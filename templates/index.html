@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remote Desktop Web Client</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        #screen {
+            width: 100%;
+            height: auto;
+            border: 2px solid #333;
+            background-color: #fff;
+            margin-bottom: 20px;
+        }
+        .controls {
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            margin-right: 10px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #status {
+            padding: 10px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .connected {
+            background-color: #28a745;
+            color: white;
+        }
+        .disconnected {
+            background-color: #dc3545;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Remote Desktop Control</h1>
+        <div id="status" class="disconnected">Disconnected</div>
+        <div class="controls">
+            <button onclick="connect()">Connect</button>
+            <button onclick="disconnect()">Disconnect</button>
+        </div>
+        <canvas id="screen" width="1024" height="768"></canvas>
+    </div>
+
+    <script>
+        let ws = null;
+        let isConnected = false;
+        const canvas = document.getElementById('screen');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        let remoteWidth = 1024;
+        let remoteHeight = 768;
+
+        function updateStatus(connected) {
+            isConnected = connected;
+            statusDiv.textContent = connected ? 'Connected' : 'Disconnected';
+            statusDiv.className = connected ? 'connected' : 'disconnected';
+        }
+
+        function connect() {
+            if (ws) return;
+
+            // Get the WebSocket URL from the current window location
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                updateStatus(true);
+                requestScreen();
+            };
+
+            ws.onclose = () => {
+                updateStatus(false);
+                ws = null;
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log('Mensaje recibido:', data.type);
+                
+                if (data.type === 'screen') {
+                    updateScreen(data.data);
+                } else if (data.type === 'mouse_moved') {
+                    console.log('Mouse movido a:', data.x, data.y);
+                } else if (data.type === 'mouse_clicked') {
+                    console.log('Click en:', data.button);
+                } else if (data.type === 'key_pressed') {
+                    console.log('Tecla presionada:', data.key);
+                }
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function requestScreen() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    action: 'get_screen'
+                }));
+            }
+        }
+
+        function updateScreen(data) {
+            const img = new Image();
+            img.onload = () => {
+                // Actualizar dimensiones remotas
+                if (data.screen_width && data.screen_height) {
+                    remoteWidth = data.screen_width;
+                    remoteHeight = data.screen_height;
+                    
+                    // Mantener el aspect ratio
+                    const containerWidth = canvas.parentElement.clientWidth;
+                    const scale = containerWidth / remoteWidth;
+                    
+                    canvas.style.width = containerWidth + 'px';
+                    canvas.style.height = (remoteHeight * scale) + 'px';
+                    canvas.width = remoteWidth;
+                    canvas.height = remoteHeight;
+                }
+                
+                // Limpiar el canvas antes de dibujar
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            };
+            img.src = 'data:image/jpeg;base64,' + data;
+        }
+
+        // Mouse events
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isConnected) return;
+            const rect = canvas.getBoundingClientRect();
+            // Calcular la posición exacta en la pantalla remota
+            const x = (e.clientX - rect.left) * (remoteWidth / rect.width);
+            const y = (e.clientY - rect.top) * (remoteHeight / rect.height);
+            
+            ws.send(JSON.stringify({
+                action: 'mouse_move',
+                x: Math.round(x),
+                y: Math.round(y)
+            }));
+        });
+
+        canvas.addEventListener('click', (e) => {
+            if (!isConnected) return;
+            ws.send(JSON.stringify({
+                action: 'mouse_click',
+                button: 'left'
+            }));
+        });
+
+        // Keyboard events
+        document.addEventListener('keydown', (e) => {
+            if (!isConnected) return;
+            ws.send(JSON.stringify({
+                action: 'key_press',
+                key: e.key
+            }));
+        });
+    </script>
+</body>
+</html>
