@@ -1,68 +1,101 @@
-from flask import Flask, render_template
+from flask import Flask, render_template, jsonify
 from flask_sock import Sock
 import base64
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import json
 import time
 import threading
 from datetime import datetime
 import os
 import sys
+import platform
 
-# Configuración para entornos sin X11
-USE_DUMMY = False
-try:
-    import pyautogui
-except Exception as e:
-    print("No se pudo inicializar PyAutoGUI, usando modo dummy")
-    USE_DUMMY = True
+# Variable global para pyautogui
+pyautogui = None
+
+# Determinar si estamos en un entorno de servidor (Render)
+IS_SERVER = os.environ.get('RENDER') == 'true' or not os.environ.get('DISPLAY')
+
+# Solo intentar importar PyAutoGUI si no estamos en el servidor
+if not IS_SERVER:
+    try:
+        import pyautogui as pag
+        pyautogui = pag
+        pyautogui.FAILSAFE = True
+        print("PyAutoGUI inicializado correctamente")
+    except Exception as e:
+        print(f"Error al importar PyAutoGUI: {e}")
+        IS_SERVER = True
+        pyautogui = None
+
+def create_info_image():
+    """Crear una imagen con información del servidor"""
+    width = 800
+    height = 400
+    img = Image.new('RGB', (width, height), color='#f0f0f0')
+    draw = ImageDraw.Draw(img)
     
-    # Clase dummy para simular PyAutoGUI
-    class DummyAutoGUI:
-        def __init__(self):
-            self.FAILSAFE = True
-            self._position = (0, 0)
-            self._screen_size = (1024, 768)
-        
-        def screenshot(self):
-            # Crear una imagen dummy de 1024x768 con fondo gris
-            img = Image.new('RGB', self._screen_size, color='gray')
-            return img
-            
-        def size(self):
-            return self._screen_size
-            
-        def moveTo(self, x, y):
-            self._position = (x, y)
-            print(f"Dummy: Moviendo mouse a {x}, {y}")
-            
-        def click(self, button='left'):
-            print(f"Dummy: Click {button} en {self._position}")
-            
-        def press(self, key):
-            print(f"Dummy: Presionando tecla {key}")
+    # Dibujar un mensaje
+    text = "Servicio de Escritorio Remoto\n\n"
+    text += "Este servicio debe ejecutarse localmente\n"
+    text += "para tener acceso al escritorio.\n\n"
+    text += "Por favor, descargue y ejecute\n"
+    text += "la aplicación en su computadora local."
     
-    # Reemplazar pyautogui con nuestra versión dummy
-    pyautogui = DummyAutoGUI()
+    # Dibujar el texto centrado
+    text_bbox = draw.multiline_textbbox((0, 0), text, align='center')
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+    
+    x = (width - text_width) / 2
+    y = (height - text_height) / 2
+    
+    draw.multiline_text((x, y), text, fill='#333333', align='center')
+    
+    return img
+
+# Determinar si estamos en un entorno de servidor (Render)
+IS_SERVER = os.environ.get('RENDER') == 'true' or not os.environ.get('DISPLAY')
+
+# Solo intentar importar PyAutoGUI si no estamos en el servidor
+if not IS_SERVER:
+    try:
+        import pyautogui
+        pyautogui.FAILSAFE = True
+    except Exception as e:
+        print(f"Error al importar PyAutoGUI: {e}")
+        IS_SERVER = True
 
 # Inicializar Flask
 app = Flask(__name__)
 sock = Sock(app)
 
-# Configuración de PyAutoGUI
-pyautogui.FAILSAFE = True
+# Ya no necesitamos esta línea, la configuración se hace arriba
+
+def get_dummy_screen():
+    """Obtener una pantalla dummy cuando no hay PyAutoGUI"""
+    return create_info_image(), (800, 400)
+
+def get_real_screen():
+    """Obtener la pantalla real usando PyAutoGUI"""
+    if not pyautogui:
+        return get_dummy_screen()
+    try:
+        return pyautogui.screenshot(), pyautogui.size()
+    except Exception as e:
+        print(f"Error capturando pantalla: {e}")
+        return get_dummy_screen()
 
 def send_screen(ws):
     """Función auxiliar para capturar y enviar la pantalla"""
     try:
-        # Capturar pantalla
-        screenshot = pyautogui.screenshot()
-        screen_size = pyautogui.size()
+        # Obtener imagen y dimensiones
+        img, screen_size = get_dummy_screen() if IS_SERVER else get_real_screen()
         
-        # Convertir a JPEG con menor calidad
+        # Convertir a JPEG
         buffered = BytesIO()
-        screenshot.save(buffered, format="JPEG", quality=30)
+        img.save(buffered, format="JPEG", quality=30)
         img_str = base64.b64encode(buffered.getvalue()).decode()
         
         # Enviar al cliente
@@ -71,16 +104,58 @@ def send_screen(ws):
             'data': img_str,
             'screen_width': screen_size[0],
             'screen_height': screen_size[1],
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'is_server': IS_SERVER
         }
         ws.send(json.dumps(response))
-        print(f"Pantalla enviada: {screen_size[0]}x{screen_size[1]}")
+        print(f"Imagen enviada: {screen_size[0]}x{screen_size[1]} ({'servidor' if IS_SERVER else 'local'})")
     except Exception as e:
         print(f"Error enviando pantalla: {e}")
+        # Enviar mensaje de error al cliente
+        ws.send(json.dumps({
+            'type': 'error',
+            'message': str(e)
+        }))
 
 @app.route('/')
 def home():
-    return render_template('index.html')
+    return render_template('index.html', is_server=IS_SERVER)
+
+@app.route('/status')
+def status():
+    return jsonify({
+        'is_server': IS_SERVER,
+        'platform': platform.system(),
+        'python_version': platform.python_version(),
+        'timestamp': datetime.now().isoformat()
+    })
+
+def handle_mouse_move(ws, x, y):
+    """Manejar movimiento del mouse"""
+    if not IS_SERVER and pyautogui:
+        try:
+            pyautogui.moveTo(x, y)
+            ws.send(json.dumps({'type': 'mouse_moved', 'x': x, 'y': y}))
+        except Exception as e:
+            print(f"Error moviendo mouse: {e}")
+
+def handle_mouse_click(ws, button):
+    """Manejar click del mouse"""
+    if not IS_SERVER and pyautogui:
+        try:
+            pyautogui.click(button=button)
+            ws.send(json.dumps({'type': 'mouse_clicked', 'button': button}))
+        except Exception as e:
+            print(f"Error haciendo click: {e}")
+
+def handle_key_press(ws, key):
+    """Manejar presionado de tecla"""
+    if not IS_SERVER and pyautogui:
+        try:
+            pyautogui.press(key)
+            ws.send(json.dumps({'type': 'key_pressed', 'key': key}))
+        except Exception as e:
+            print(f"Error presionando tecla: {e}")
 
 @sock.route('/ws')
 def websocket(ws):
@@ -90,50 +165,42 @@ def websocket(ws):
         # Enviar pantalla inicial
         send_screen(ws)
         
-        # Configurar temporizador para envío periódico
+        # Configurar temporizador
         last_screen_time = time.time()
-        screen_interval = 1.0  # segundos entre actualizaciones
+        screen_interval = 5.0 if IS_SERVER else 1.0
         
         while True:
             try:
-                # Verificar si es tiempo de enviar pantalla
+                # Actualizar pantalla periódicamente
                 current_time = time.time()
                 if current_time - last_screen_time >= screen_interval:
                     send_screen(ws)
                     last_screen_time = current_time
                 
-                # Recibir comandos del cliente
-                data = ws.receive()
-                command = json.loads(data)
-                print(f"Comando recibido: {command['action']}")
-                
-                if command['action'] == 'get_screen':
-                    send_screen(ws)
+                # Procesar comandos
+                try:
+                    data = ws.receive(timeout=0.1)  # Timeout corto para no bloquear
+                    if not data:
+                        continue
+                        
+                    command = json.loads(data)
+                    action = command.get('action')
                     
-                elif command['action'] == 'mouse_move':
-                    x, y = command.get('x', 0), command.get('y', 0)
-                    print(f"Moviendo mouse a: ({x}, {y})")
-                    pyautogui.moveTo(x, y)
-                    ws.send(json.dumps({'type': 'mouse_moved', 'x': x, 'y': y}))
+                    if action == 'get_screen':
+                        send_screen(ws)
+                    elif action == 'mouse_move' and not IS_SERVER:
+                        handle_mouse_move(ws, command.get('x', 0), command.get('y', 0))
+                    elif action == 'mouse_click' and not IS_SERVER:
+                        handle_mouse_click(ws, command.get('button', 'left'))
+                    elif action == 'key_press' and not IS_SERVER:
+                        handle_key_press(ws, command.get('key'))
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"Error decodificando comando: {e}")
+                    continue
                     
-                elif command['action'] == 'mouse_click':
-                    button = command.get('button', 'left')
-                    print(f"Click del mouse: {button}")
-                    pyautogui.click(button=button)
-                    ws.send(json.dumps({'type': 'mouse_clicked', 'button': button}))
-                    
-                elif command['action'] == 'key_press':
-                    key = command.get('key')
-                    if key:
-                        print(f"Tecla presionada: {key}")
-                        pyautogui.press(key)
-                        ws.send(json.dumps({'type': 'key_pressed', 'key': key}))
-                    
-            except json.JSONDecodeError as e:
-                print(f"Error decodificando JSON: {e}")
-                continue
             except Exception as e:
-                print(f"Error procesando comando: {e}")
+                if "timeout" not in str(e).lower():
+                    print(f"Error procesando comando: {e}")
                 continue
                 
     except Exception as e:
