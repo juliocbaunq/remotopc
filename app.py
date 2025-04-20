@@ -11,23 +11,15 @@ import os
 import sys
 import platform
 
-# Variable global para pyautogui
-pyautogui = None
-
-# Determinar si estamos en un entorno de servidor (Render)
-IS_SERVER = os.environ.get('RENDER') == 'true' or not os.environ.get('DISPLAY')
-
-# Solo intentar importar PyAutoGUI si no estamos en el servidor
-if not IS_SERVER:
-    try:
-        import pyautogui as pag
-        pyautogui = pag
-        pyautogui.FAILSAFE = True
-        print("PyAutoGUI inicializado correctamente")
-    except Exception as e:
-        print(f"Error al importar PyAutoGUI: {e}")
-        IS_SERVER = True
-        pyautogui = None
+# Importar PyAutoGUI
+try:
+    import pyautogui as pag
+    pyautogui = pag
+    pyautogui.FAILSAFE = True
+    print("PyAutoGUI inicializado correctamente")
+except Exception as e:
+    print(f"Error al importar PyAutoGUI: {e}")
+    pyautogui = None
 
 def create_info_image():
     """Crear una imagen con información del servidor"""
@@ -73,25 +65,21 @@ sock = Sock(app)
 
 # Ya no necesitamos esta línea, la configuración se hace arriba
 
-def get_dummy_screen():
-    """Obtener una pantalla dummy cuando no hay PyAutoGUI"""
-    return create_info_image(), (800, 400)
-
-def get_real_screen():
-    """Obtener la pantalla real usando PyAutoGUI"""
-    if not pyautogui:
-        return get_dummy_screen()
+def get_screen():
+    """Obtener la pantalla usando PyAutoGUI"""
     try:
+        if not pyautogui:
+            raise Exception("PyAutoGUI no está disponible")
         return pyautogui.screenshot(), pyautogui.size()
     except Exception as e:
         print(f"Error capturando pantalla: {e}")
-        return get_dummy_screen()
+        return None, None
 
 def send_screen(ws):
     """Función auxiliar para capturar y enviar la pantalla"""
     try:
         # Obtener imagen y dimensiones
-        img, screen_size = get_dummy_screen() if IS_SERVER else get_real_screen()
+        img, screen_size = get_screen()
         
         # Convertir a JPEG
         buffered = BytesIO()
@@ -119,7 +107,7 @@ def send_screen(ws):
 
 @app.route('/')
 def home():
-    return render_template('index.html', is_server=IS_SERVER)
+    return render_template('index.html')
 
 @app.route('/status')
 def status():
@@ -132,30 +120,36 @@ def status():
 
 def handle_mouse_move(ws, x, y):
     """Manejar movimiento del mouse"""
-    if not IS_SERVER and pyautogui:
-        try:
-            pyautogui.moveTo(x, y)
-            ws.send(json.dumps({'type': 'mouse_moved', 'x': x, 'y': y}))
-        except Exception as e:
-            print(f"Error moviendo mouse: {e}")
+    try:
+        if not pyautogui:
+            raise Exception("PyAutoGUI no está disponible")
+        pyautogui.moveTo(x, y)
+        ws.send(json.dumps({'type': 'mouse_moved', 'x': x, 'y': y}))
+    except Exception as e:
+        print(f"Error moviendo mouse: {e}")
+        ws.send(json.dumps({'type': 'error', 'message': str(e)}))
 
 def handle_mouse_click(ws, button):
     """Manejar click del mouse"""
-    if not IS_SERVER and pyautogui:
-        try:
-            pyautogui.click(button=button)
-            ws.send(json.dumps({'type': 'mouse_clicked', 'button': button}))
-        except Exception as e:
-            print(f"Error haciendo click: {e}")
+    try:
+        if not pyautogui:
+            raise Exception("PyAutoGUI no está disponible")
+        pyautogui.click(button=button)
+        ws.send(json.dumps({'type': 'mouse_clicked', 'button': button}))
+    except Exception as e:
+        print(f"Error haciendo click: {e}")
+        ws.send(json.dumps({'type': 'error', 'message': str(e)}))
 
 def handle_key_press(ws, key):
     """Manejar presionado de tecla"""
-    if not IS_SERVER and pyautogui:
-        try:
-            pyautogui.press(key)
-            ws.send(json.dumps({'type': 'key_pressed', 'key': key}))
-        except Exception as e:
-            print(f"Error presionando tecla: {e}")
+    try:
+        if not pyautogui:
+            raise Exception("PyAutoGUI no está disponible")
+        pyautogui.press(key)
+        ws.send(json.dumps({'type': 'key_pressed', 'key': key}))
+    except Exception as e:
+        print(f"Error presionando tecla: {e}")
+        ws.send(json.dumps({'type': 'error', 'message': str(e)}))
 
 @sock.route('/ws')
 def websocket(ws):
