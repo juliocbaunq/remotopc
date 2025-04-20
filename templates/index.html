@@ -171,26 +171,33 @@
             
             ws.onmessage = async (event) => {
                 try {
-                    // Si es un ArrayBuffer, convertir a texto
-                    let data;
+                    let message;
                     if (event.data instanceof ArrayBuffer) {
-                        const decoder = new TextDecoder();
-                        data = JSON.parse(decoder.decode(event.data));
+                        // Datos binarios - crear blob y URL
+                        const blob = new Blob([event.data], {type: 'image/jpeg'});
+                        const imageUrl = URL.createObjectURL(blob);
+                        message = {
+                            type: 'screen',
+                            imageUrl: imageUrl,
+                            screen_width: remoteWidth,
+                            screen_height: remoteHeight
+                        };
                     } else {
-                        data = JSON.parse(event.data);
+                        // Datos JSON
+                        message = JSON.parse(event.data);
                     }
                     
-                    if (data.type === 'screen') {
-                        await updateScreen(data);
-                    } else if (data.type === 'error') {
-                        console.error('Error:', data.message);
-                        showError(data.message);
-                    } else if (data.type === 'mouse_moved') {
-                        console.log('Mouse movido a:', data.x, data.y);
-                    } else if (data.type === 'mouse_clicked') {
-                        console.log('Click:', data.button);
-                    } else if (data.type === 'key_pressed') {
-                        console.log('Tecla presionada:', data.key);
+                    if (message.type === 'screen') {
+                        await updateScreen(message);
+                    } else if (message.type === 'error') {
+                        console.error('Error:', message.message);
+                        showError(message.message);
+                    } else if (message.type === 'mouse_moved') {
+                        console.log('Mouse movido a:', message.x, message.y);
+                    } else if (message.type === 'mouse_clicked') {
+                        console.log('Click:', message.button);
+                    } else if (message.type === 'key_pressed') {
+                        console.log('Tecla presionada:', message.key);
                     }
                 } catch (error) {
                     console.error('Error procesando mensaje:', error);
@@ -238,6 +245,11 @@
                         ctx.clearRect(0, 0, canvas.width, canvas.height);
                         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                         
+                        // Liberar URL del blob si existe
+                        if (data.imageUrl) {
+                            URL.revokeObjectURL(data.imageUrl);
+                        }
+                        
                         // Solicitar siguiente frame
                         if (isConnected) {
                             requestAnimationFrame(() => requestScreen());
@@ -253,15 +265,13 @@
                     reject(new Error('Error cargando imagen'));
                 };
                 
-                // Convertir datos binarios a base64 si es necesario
-                if (data.data instanceof ArrayBuffer) {
-                    const bytes = new Uint8Array(data.data);
-                    const binary = Array.from(bytes)
-                        .map(byte => String.fromCharCode(byte))
-                        .join('');
-                    img.src = 'data:image/jpeg;base64,' + btoa(binary);
-                } else {
+                // Cargar imagen desde URL o base64
+                if (data.imageUrl) {
+                    img.src = data.imageUrl;
+                } else if (data.data) {
                     img.src = 'data:image/jpeg;base64,' + data.data;
+                } else {
+                    reject(new Error('Datos de imagen no válidos'));
                 }
             });
         }
