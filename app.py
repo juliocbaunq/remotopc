@@ -100,6 +100,26 @@ def get_screen():
         print(f"Error capturando pantalla: {e}")
         return create_error_image(str(e))
 
+def send_binary_response(ws, data):
+    """Enviar respuesta binaria al cliente"""
+    try:
+        # Verificar si el cliente quiere modo binario
+        if hasattr(ws, 'binary_mode') and ws.binary_mode:
+            # Si es una imagen, enviar como bytes
+            if isinstance(data.get('data'), str) and data.get('type') == 'screen':
+                try:
+                    img_bytes = base64.b64decode(data['data'])
+                    ws.send(img_bytes)
+                    return
+                except Exception as e:
+                    print(f"Error enviando imagen binaria: {e}")
+        
+        # Si no es binario o hubo error, enviar como JSON
+        json_str = json.dumps(data)
+        ws.send(json_str.encode('utf-8'))
+    except Exception as e:
+        print(f"Error enviando respuesta: {e}")
+
 def send_screen(ws):
     """Función auxiliar para capturar y enviar la pantalla"""
     try:
@@ -112,18 +132,18 @@ def send_screen(ws):
         # Convertir a JPEG
         buffered = BytesIO()
         img.save(buffered, format="JPEG", quality=30)
-        img_str = base64.b64encode(buffered.getvalue()).decode()
+        img_bytes = buffered.getvalue()
+        img_str = base64.b64encode(img_bytes).decode()
         
         # Enviar al cliente
-        response = {
+        send_binary_response(ws, {
             'type': 'screen',
             'data': img_str,
             'screen_width': screen_size[0],
             'screen_height': screen_size[1],
             'timestamp': datetime.now().isoformat(),
             'error': img == None
-        }
-        ws.send(json.dumps(response))
+        })
         print(f"Imagen enviada: {screen_size[0]}x{screen_size[1]}")
     except Exception as e:
         print(f"Error enviando pantalla: {e}")
@@ -134,20 +154,20 @@ def send_screen(ws):
             error_img.save(buffered, format="JPEG", quality=30)
             img_str = base64.b64encode(buffered.getvalue()).decode()
             
-            ws.send(json.dumps({
+            send_binary_response(ws, {
                 'type': 'screen',
                 'data': img_str,
                 'screen_width': error_size[0],
                 'screen_height': error_size[1],
                 'timestamp': datetime.now().isoformat(),
                 'error': True
-            }))
+            })
         except Exception as e2:
             print(f"Error enviando imagen de error: {e2}")
-            ws.send(json.dumps({
+            send_binary_response(ws, {
                 'type': 'error',
                 'message': str(e)
-            }))
+            })
 
 @app.route('/')
 def home():
@@ -195,6 +215,33 @@ def handle_key_press(ws, key):
         print(f"Error presionando tecla: {e}")
         ws.send(json.dumps({'type': 'error', 'message': str(e)}))
 
+def process_command(ws, data):
+    """Procesar un comando recibido del cliente"""
+    try:
+        # Si los datos son binarios, decodificar
+        if isinstance(data, bytes):
+            data = data.decode('utf-8')
+            
+        command = json.loads(data)
+        action = command.get('action')
+        
+        if action == 'get_screen':
+            send_screen(ws)
+        elif action == 'set_binary':
+            # El cliente solicita modo binario
+            ws.binary_mode = command.get('enable', False)
+            print(f"Modo binario: {ws.binary_mode}")
+        elif action == 'mouse_move':
+            handle_mouse_move(ws, command.get('x', 0), command.get('y', 0))
+        elif action == 'mouse_click':
+            handle_mouse_click(ws, command.get('button', 'left'))
+        elif action == 'key_press':
+            handle_key_press(ws, command.get('key'))
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"Error decodificando comando: {e}")
+    except Exception as e:
+        print(f"Error procesando comando: {e}")
+
 @sock.route('/ws')
 def websocket(ws):
     try:
@@ -205,7 +252,7 @@ def websocket(ws):
         
         # Configurar temporizador
         last_screen_time = time.time()
-        screen_interval = 5.0 if IS_SERVER else 1.0
+        screen_interval = 0.1  # 100ms entre frames
         
         while True:
             try:
@@ -215,31 +262,19 @@ def websocket(ws):
                     send_screen(ws)
                     last_screen_time = current_time
                 
-                # Procesar comandos
-                try:
-                    data = ws.receive(timeout=0.1)  # Timeout corto para no bloquear
-                    if not data:
-                        continue
-                        
-                    command = json.loads(data)
-                    action = command.get('action')
+                # Procesar comandos sin bloquear
+                data = ws.receive()
+                if data:
+                    process_command(ws, data)
                     
-                    if action == 'get_screen':
-                        send_screen(ws)
-                    elif action == 'mouse_move' and not IS_SERVER:
-                        handle_mouse_move(ws, command.get('x', 0), command.get('y', 0))
-                    elif action == 'mouse_click' and not IS_SERVER:
-                        handle_mouse_click(ws, command.get('button', 'left'))
-                    elif action == 'key_press' and not IS_SERVER:
-                        handle_key_press(ws, command.get('key'))
-                except (json.JSONDecodeError, ValueError) as e:
-                    print(f"Error decodificando comando: {e}")
-                    continue
+                # Pequeña pausa para no saturar la CPU
+                time.sleep(0.01)
                     
             except Exception as e:
-                if "timeout" not in str(e).lower():
-                    print(f"Error procesando comando: {e}")
-                continue
+                print(f"Error en el bucle principal: {e}")
+                if "connection" in str(e).lower():
+                    break
+                time.sleep(0.1)  # Esperar un poco si hay error
                 
     except Exception as e:
         print(f"Error en WebSocket: {e}")
