@@ -11,15 +11,22 @@ import os
 import sys
 import platform
 
-# Importar PyAutoGUI
-try:
-    import pyautogui as pag
-    pyautogui = pag
-    pyautogui.FAILSAFE = True
-    print("PyAutoGUI inicializado correctamente")
-except Exception as e:
-    print(f"Error al importar PyAutoGUI: {e}")
-    pyautogui = None
+# Verificar si tenemos display
+HAS_DISPLAY = bool(os.environ.get('DISPLAY')) if platform.system() != 'Windows' else True
+
+# Importar PyAutoGUI solo si tenemos display
+pyautogui = None
+if HAS_DISPLAY:
+    try:
+        import pyautogui as pag
+        pyautogui = pag
+        pyautogui.FAILSAFE = True
+        print("PyAutoGUI inicializado correctamente")
+    except Exception as e:
+        print(f"Error al importar PyAutoGUI: {e}")
+        pyautogui = None
+else:
+    print("No hay display disponible para PyAutoGUI")
 
 def create_info_image():
     """Crear una imagen con información del servidor"""
