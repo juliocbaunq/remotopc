@@ -65,21 +65,42 @@ sock = Sock(app)
 
 # Ya no necesitamos esta línea, la configuración se hace arriba
 
+def create_error_image(error_message):
+    """Crear una imagen con mensaje de error"""
+    width = 800
+    height = 400
+    img = Image.new('RGB', (width, height), color='#f0f0f0')
+    draw = ImageDraw.Draw(img)
+    
+    # Dibujar mensaje de error
+    draw.text((width/2, height/2), f"Error: {error_message}", 
+              fill='#FF0000', anchor="mm")
+    
+    return img, (width, height)
+
 def get_screen():
     """Obtener la pantalla usando PyAutoGUI"""
     try:
         if not pyautogui:
-            raise Exception("PyAutoGUI no está disponible")
-        return pyautogui.screenshot(), pyautogui.size()
+            return create_error_image("PyAutoGUI no está disponible")
+        
+        screenshot = pyautogui.screenshot()
+        if not screenshot:
+            return create_error_image("No se pudo capturar la pantalla")
+            
+        return screenshot, pyautogui.size()
     except Exception as e:
         print(f"Error capturando pantalla: {e}")
-        return None, None
+        return create_error_image(str(e))
 
 def send_screen(ws):
     """Función auxiliar para capturar y enviar la pantalla"""
     try:
         # Obtener imagen y dimensiones
         img, screen_size = get_screen()
+        
+        if not img or not screen_size:
+            img, screen_size = create_error_image("Error obteniendo la imagen")
         
         # Convertir a JPEG
         buffered = BytesIO()
@@ -93,17 +114,33 @@ def send_screen(ws):
             'screen_width': screen_size[0],
             'screen_height': screen_size[1],
             'timestamp': datetime.now().isoformat(),
-            'is_server': IS_SERVER
+            'error': img == None
         }
         ws.send(json.dumps(response))
-        print(f"Imagen enviada: {screen_size[0]}x{screen_size[1]} ({'servidor' if IS_SERVER else 'local'})")
+        print(f"Imagen enviada: {screen_size[0]}x{screen_size[1]}")
     except Exception as e:
         print(f"Error enviando pantalla: {e}")
-        # Enviar mensaje de error al cliente
-        ws.send(json.dumps({
-            'type': 'error',
-            'message': str(e)
-        }))
+        # Intentar enviar imagen de error
+        try:
+            error_img, error_size = create_error_image(str(e))
+            buffered = BytesIO()
+            error_img.save(buffered, format="JPEG", quality=30)
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+            
+            ws.send(json.dumps({
+                'type': 'screen',
+                'data': img_str,
+                'screen_width': error_size[0],
+                'screen_height': error_size[1],
+                'timestamp': datetime.now().isoformat(),
+                'error': True
+            }))
+        except Exception as e2:
+            print(f"Error enviando imagen de error: {e2}")
+            ws.send(json.dumps({
+                'type': 'error',
+                'message': str(e)
+            }))
 
 @app.route('/')
 def home():
