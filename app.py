@@ -9,24 +9,45 @@ import threading
 from datetime import datetime
 import os
 import sys
-import platform
+import json
+import time
+import base64
+from io import BytesIO
+from datetime import datetime
+from flask import Flask, render_template, jsonify
+from flask_sock import Sock
+from PIL import Image, ImageDraw, ImageFont
+from mss import mss
+from pynput import mouse, keyboard
 
-# Verificar si tenemos display
-HAS_DISPLAY = bool(os.environ.get('DISPLAY')) if platform.system() != 'Windows' else True
+# Inicializar Flask
+app = Flask(__name__)
+sock = Sock(app)
 
-# Importar PyAutoGUI solo si tenemos display
-pyautogui = None
-if HAS_DISPLAY:
+# Verificar si estamos en un servidor
+IS_SERVER = os.environ.get('RENDER') is not None
+
+# Variables globales para controladores
+sct = None
+mouse_controller = None
+keyboard_controller = None
+SCREEN_CONTROLLER_AVAILABLE = False
+
+# Inicializar controladores si no estamos en servidor
+if not IS_SERVER:
     try:
-        import pyautogui as pag
-        pyautogui = pag
-        pyautogui.FAILSAFE = True
-        print("PyAutoGUI inicializado correctamente")
+        sct = mss()
+        mouse_controller = mouse.Controller()
+        keyboard_controller = keyboard.Controller()
+        SCREEN_CONTROLLER_AVAILABLE = True
     except Exception as e:
-        print(f"Error al importar PyAutoGUI: {e}")
-        pyautogui = None
-else:
-    print("No hay display disponible para PyAutoGUI")
+        print(f"Error inicializando controladores: {e}")
+        IS_SERVER = True
+
+# Rutas para fuentes
+font_path = os.path.join(os.path.dirname(__file__), 'static', 'fonts', 'arial.ttf')
+if not os.path.exists(font_path):
+    font_path = None
 
 def create_info_image():
     """Crear una imagen con información del servidor"""
@@ -35,42 +56,20 @@ def create_info_image():
     img = Image.new('RGB', (width, height), color='#f0f0f0')
     draw = ImageDraw.Draw(img)
     
-    # Dibujar un mensaje
-    text = "Servicio de Escritorio Remoto\n\n"
-    text += "Este servicio debe ejecutarse localmente\n"
-    text += "para tener acceso al escritorio.\n\n"
-    text += "Por favor, descargue y ejecute\n"
-    text += "la aplicación en su computadora local."
-    
-    # Dibujar el texto centrado
-    text_bbox = draw.multiline_textbbox((0, 0), text, align='center')
-    text_width = text_bbox[2] - text_bbox[0]
-    text_height = text_bbox[3] - text_bbox[1]
-    
-    x = (width - text_width) / 2
-    y = (height - text_height) / 2
-    
-    draw.multiline_text((x, y), text, fill='#333333', align='center')
-    
-    return img
-
-# Determinar si estamos en un entorno de servidor (Render)
-IS_SERVER = os.environ.get('RENDER') == 'true' or not os.environ.get('DISPLAY')
-
-# Solo intentar importar PyAutoGUI si no estamos en el servidor
-if not IS_SERVER:
+    # Intentar usar la fuente especificada o la default
     try:
-        import pyautogui
-        pyautogui.FAILSAFE = True
-    except Exception as e:
-        print(f"Error al importar PyAutoGUI: {e}")
-        IS_SERVER = True
-
-# Inicializar Flask
-app = Flask(__name__)
-sock = Sock(app)
-
-# Ya no necesitamos esta línea, la configuración se hace arriba
+        if font_path:
+            font = ImageFont.truetype(font_path, 20)
+        else:
+            font = ImageFont.load_default()
+    except:
+        font = ImageFont.load_default()
+    
+    message = "Este servicio debe ejecutarse localmente\npara tener acceso completo al escritorio remoto."
+    draw.text((width/2, height/2), message, 
+              fill='#000000', font=font, anchor="mm")
+    
+    return img, (width, height)
 
 def create_error_image(error_message):
     """Crear una imagen con mensaje de error"""
@@ -79,23 +78,32 @@ def create_error_image(error_message):
     img = Image.new('RGB', (width, height), color='#f0f0f0')
     draw = ImageDraw.Draw(img)
     
-    # Dibujar mensaje de error
+    try:
+        if font_path:
+            font = ImageFont.truetype(font_path, 20)
+        else:
+            font = ImageFont.load_default()
+    except:
+        font = ImageFont.load_default()
+    
     draw.text((width/2, height/2), f"Error: {error_message}", 
-              fill='#FF0000', anchor="mm")
+              fill='#FF0000', font=font, anchor="mm")
     
     return img, (width, height)
 
 def get_screen():
-    """Obtener la pantalla usando PyAutoGUI"""
+    """Capturar la pantalla y retornar imagen y dimensiones"""
     try:
-        if not pyautogui:
-            return create_error_image("PyAutoGUI no está disponible")
-        
-        screenshot = pyautogui.screenshot()
-        if not screenshot:
-            return create_error_image("No se pudo capturar la pantalla")
+        if not SCREEN_CONTROLLER_AVAILABLE:
+            return create_info_image()
             
-        return screenshot, pyautogui.size()
+        # Capturar pantalla usando mss
+        with mss() as sct:
+            monitor = sct.monitors[0]  # Monitor principal
+            screenshot = sct.grab(monitor)
+            # Convertir a PIL Image
+            img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
+            return img, img.size
     except Exception as e:
         print(f"Error capturando pantalla: {e}")
         return create_error_image(str(e))
@@ -103,20 +111,24 @@ def get_screen():
 def send_binary_response(ws, data):
     """Enviar respuesta binaria al cliente"""
     try:
-        # Verificar si el cliente quiere modo binario
-        if hasattr(ws, 'binary_mode') and ws.binary_mode:
-            # Si es una imagen, enviar como bytes
-            if isinstance(data.get('data'), str) and data.get('type') == 'screen':
-                try:
-                    img_bytes = base64.b64decode(data['data'])
-                    ws.send(img_bytes)
-                    return
-                except Exception as e:
-                    print(f"Error enviando imagen binaria: {e}")
+        # Si es una imagen, convertir a base64
+        if data.get('type') == 'screen' and isinstance(data.get('image'), Image.Image):
+            try:
+                # Convertir imagen a bytes JPEG
+                buffered = BytesIO()
+                data['image'].save(buffered, format="JPEG", quality=70)
+                img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                
+                # Reemplazar imagen con string base64
+                data['data'] = img_str
+                del data['image']
+            except Exception as e:
+                print(f"Error convirtiendo imagen: {e}")
+                return
         
-        # Si no es binario o hubo error, enviar como JSON
+        # Enviar como JSON
         json_str = json.dumps(data)
-        ws.send(json_str.encode('utf-8'))
+        ws.send(json_str)
     except Exception as e:
         print(f"Error enviando respuesta: {e}")
 
@@ -129,34 +141,24 @@ def send_screen(ws):
         if not img or not screen_size:
             img, screen_size = create_error_image("Error obteniendo la imagen")
         
-        # Convertir a JPEG
-        buffered = BytesIO()
-        img.save(buffered, format="JPEG", quality=30)
-        img_bytes = buffered.getvalue()
-        img_str = base64.b64encode(img_bytes).decode()
-        
         # Enviar al cliente
         send_binary_response(ws, {
             'type': 'screen',
-            'data': img_str,
+            'image': img,  # La imagen será convertida en send_binary_response
             'screen_width': screen_size[0],
             'screen_height': screen_size[1],
             'timestamp': datetime.now().isoformat(),
-            'error': img == None
+            'error': False
         })
         print(f"Imagen enviada: {screen_size[0]}x{screen_size[1]}")
     except Exception as e:
         print(f"Error enviando pantalla: {e}")
-        # Intentar enviar imagen de error
         try:
+            # Crear y enviar imagen de error
             error_img, error_size = create_error_image(str(e))
-            buffered = BytesIO()
-            error_img.save(buffered, format="JPEG", quality=30)
-            img_str = base64.b64encode(buffered.getvalue()).decode()
-            
             send_binary_response(ws, {
                 'type': 'screen',
-                'data': img_str,
+                'image': error_img,
                 'screen_width': error_size[0],
                 'screen_height': error_size[1],
                 'timestamp': datetime.now().isoformat(),
@@ -177,43 +179,85 @@ def home():
 def status():
     return jsonify({
         'is_server': IS_SERVER,
-        'platform': platform.system(),
-        'python_version': platform.python_version(),
+        'platform': os.name,
+        'python_version': os.sys.version,
         'timestamp': datetime.now().isoformat()
     })
 
 def handle_mouse_move(ws, x, y):
     """Manejar movimiento del mouse"""
     try:
-        if not pyautogui:
-            raise Exception("PyAutoGUI no está disponible")
-        pyautogui.moveTo(x, y)
-        ws.send(json.dumps({'type': 'mouse_moved', 'x': x, 'y': y}))
+        if SCREEN_CONTROLLER_AVAILABLE:
+            mouse_controller.position = (x, y)
+            send_binary_response(ws, {
+                'type': 'mouse_moved',
+                'x': x,
+                'y': y
+            })
     except Exception as e:
         print(f"Error moviendo mouse: {e}")
-        ws.send(json.dumps({'type': 'error', 'message': str(e)}))
+        send_binary_response(ws, {
+            'type': 'error',
+            'message': str(e)
+        })
 
 def handle_mouse_click(ws, button):
     """Manejar click del mouse"""
     try:
-        if not pyautogui:
-            raise Exception("PyAutoGUI no está disponible")
-        pyautogui.click(button=button)
-        ws.send(json.dumps({'type': 'mouse_clicked', 'button': button}))
+        if SCREEN_CONTROLLER_AVAILABLE:
+            if button == 'left':
+                mouse_controller.click(mouse.Button.left)
+            elif button == 'right':
+                mouse_controller.click(mouse.Button.right)
+            elif button == 'middle':
+                mouse_controller.click(mouse.Button.middle)
+                
+            send_binary_response(ws, {
+                'type': 'mouse_clicked',
+                'button': button
+            })
     except Exception as e:
         print(f"Error haciendo click: {e}")
-        ws.send(json.dumps({'type': 'error', 'message': str(e)}))
+        send_binary_response(ws, {
+            'type': 'error',
+            'message': str(e)
+        })
 
 def handle_key_press(ws, key):
-    """Manejar presionado de tecla"""
+    """Manejar presión de tecla"""
     try:
-        if not pyautogui:
-            raise Exception("PyAutoGUI no está disponible")
-        pyautogui.press(key)
-        ws.send(json.dumps({'type': 'key_pressed', 'key': key}))
+        if SCREEN_CONTROLLER_AVAILABLE:
+            # Manejar teclas especiales
+            special_keys = {
+                'Enter': keyboard.Key.enter,
+                'Backspace': keyboard.Key.backspace,
+                'Tab': keyboard.Key.tab,
+                'Space': keyboard.Key.space,
+                'Escape': keyboard.Key.esc,
+                'Delete': keyboard.Key.delete,
+                'ArrowUp': keyboard.Key.up,
+                'ArrowDown': keyboard.Key.down,
+                'ArrowLeft': keyboard.Key.left,
+                'ArrowRight': keyboard.Key.right
+            }
+            
+            if key in special_keys:
+                keyboard_controller.press(special_keys[key])
+                keyboard_controller.release(special_keys[key])
+            else:
+                keyboard_controller.press(key)
+                keyboard_controller.release(key)
+                
+            send_binary_response(ws, {
+                'type': 'key_pressed',
+                'key': key
+            })
     except Exception as e:
         print(f"Error presionando tecla: {e}")
-        ws.send(json.dumps({'type': 'error', 'message': str(e)}))
+        send_binary_response(ws, {
+            'type': 'error',
+            'message': str(e)
+        })
 
 def process_command(ws, data):
     """Procesar un comando recibido del cliente"""
@@ -244,37 +288,27 @@ def process_command(ws, data):
 
 @sock.route('/ws')
 def websocket(ws):
+    """Manejar conexión WebSocket"""
+    print("Nueva conexión WebSocket establecida")
+    
     try:
-        print("Nueva conexión WebSocket establecida")
-        
         # Enviar pantalla inicial
         send_screen(ws)
         
-        # Configurar temporizador
-        last_screen_time = time.time()
-        screen_interval = 0.1  # 100ms entre frames
-        
         while True:
             try:
-                # Actualizar pantalla periódicamente
-                current_time = time.time()
-                if current_time - last_screen_time >= screen_interval:
-                    send_screen(ws)
-                    last_screen_time = current_time
-                
-                # Procesar comandos sin bloquear
+                # Recibir comando del cliente
                 data = ws.receive()
-                if data:
-                    process_command(ws, data)
-                    
-                # Pequeña pausa para no saturar la CPU
-                time.sleep(0.01)
-                    
+                if not data:
+                    continue
+                
+                # Procesar comando
+                process_command(ws, data)
+                
             except Exception as e:
-                print(f"Error en el bucle principal: {e}")
+                print(f"Error en WebSocket: {e}")
                 if "connection" in str(e).lower():
                     break
-                time.sleep(0.1)  # Esperar un poco si hay error
                 
     except Exception as e:
         print(f"Error en WebSocket: {e}")
