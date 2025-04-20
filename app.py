@@ -1,6 +1,5 @@
 from flask import Flask, render_template
 from flask_sock import Sock
-import pyautogui
 import base64
 from io import BytesIO
 from PIL import Image
@@ -8,6 +7,44 @@ import json
 import time
 import threading
 from datetime import datetime
+import os
+import sys
+
+# Configuración para entornos sin X11
+USE_DUMMY = False
+try:
+    import pyautogui
+except Exception as e:
+    print("No se pudo inicializar PyAutoGUI, usando modo dummy")
+    USE_DUMMY = True
+    
+    # Clase dummy para simular PyAutoGUI
+    class DummyAutoGUI:
+        def __init__(self):
+            self.FAILSAFE = True
+            self._position = (0, 0)
+            self._screen_size = (1024, 768)
+        
+        def screenshot(self):
+            # Crear una imagen dummy de 1024x768 con fondo gris
+            img = Image.new('RGB', self._screen_size, color='gray')
+            return img
+            
+        def size(self):
+            return self._screen_size
+            
+        def moveTo(self, x, y):
+            self._position = (x, y)
+            print(f"Dummy: Moviendo mouse a {x}, {y}")
+            
+        def click(self, button='left'):
+            print(f"Dummy: Click {button} en {self._position}")
+            
+        def press(self, key):
+            print(f"Dummy: Presionando tecla {key}")
+    
+    # Reemplazar pyautogui con nuestra versión dummy
+    pyautogui = DummyAutoGUI()
 
 # Inicializar Flask
 app = Flask(__name__)
