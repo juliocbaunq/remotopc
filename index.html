@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remote Desktop Web Client</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+            color: #333;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            text-align: center;
+            padding: 20px;
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 30px;
+        }
+        h2 {
+            color: #34495e;
+            margin-top: 30px;
+        }
+        #screen {
+            width: 100%;
+            height: auto;
+            border: 2px solid #333;
+            background-color: #fff;
+            margin: 30px auto;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-radius: 8px;
+        }
+        .controls {
+            margin: 20px 0;
+        }
+        button {
+            padding: 12px 24px;
+            margin: 0 10px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+        button:hover {
+            background-color: #0056b3;
+            transform: translateY(-2px);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        #status {
+            padding: 12px;
+            margin: 20px auto;
+            border-radius: 6px;
+            font-weight: bold;
+            display: inline-block;
+            min-width: 200px;
+        }
+        .connected {
+            background-color: #28a745;
+            color: white;
+        }
+        .disconnected {
+            background-color: #dc3545;
+            color: white;
+        }
+        .server-message {
+            background-color: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin: 30px auto;
+            max-width: 800px;
+        }
+        .server-message p {
+            margin: 15px 0;
+            font-size: 16px;
+        }
+        .server-message ol {
+            text-align: left;
+            margin: 20px auto;
+            max-width: 400px;
+        }
+        .server-message li {
+            margin: 10px 0;
+            font-size: 16px;
+        }
+        .download-section {
+            margin: 30px 0;
+        }
+        .download-button {
+            display: inline-block;
+            padding: 15px 30px;
+            background-color: #2ecc71;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-size: 18px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        .download-button:hover {
+            background-color: #27ae60;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Remote Desktop Control</h1>
+        <div id="status" class="disconnected">Disconnected</div>
+        
+        <div class="controls">
+            <button onclick="connect()">Connect</button>
+            <button onclick="disconnect()">Disconnect</button>
+        </div>
+        
+        <canvas id="screen" width="1024" height="768"></canvas>
+    </div>
+
+    <script>
+        let ws = null;
+        let isConnected = false;
+        const canvas = document.getElementById('screen');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        let remoteWidth = 1024;
+        let remoteHeight = 768;
+
+        function updateStatus(connected) {
+            isConnected = connected;
+            statusDiv.textContent = connected ? 'Connected' : 'Disconnected';
+            statusDiv.className = connected ? 'connected' : 'disconnected';
+        }
+
+        function connect() {
+            if (ws) return;
+
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = protocol + '//' + window.location.host + '/ws';
+            
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+            
+            ws.onopen = () => {
+                console.log('Conexión WebSocket establecida');
+                updateStatus(true);
+                isConnected = true;
+                
+                // Configurar codificación binaria
+                ws.send(JSON.stringify({
+                    action: 'set_binary',
+                    enable: true
+                }));
+                requestScreen();
+            };
+            
+            ws.onclose = () => {
+                console.log('Conexión WebSocket cerrada');
+                updateStatus(false);
+                ws = null;
+            };
+            
+            ws.onmessage = async (event) => {
+                try {
+                    // Si es un ArrayBuffer, convertir a texto
+                    let data;
+                    if (event.data instanceof ArrayBuffer) {
+                        const decoder = new TextDecoder();
+                        data = JSON.parse(decoder.decode(event.data));
+                    } else {
+                        data = JSON.parse(event.data);
+                    }
+                    
+                    if (data.type === 'screen') {
+                        await updateScreen(data);
+                    } else if (data.type === 'error') {
+                        console.error('Error:', data.message);
+                        showError(data.message);
+                    } else if (data.type === 'mouse_moved') {
+                        console.log('Mouse movido a:', data.x, data.y);
+                    } else if (data.type === 'mouse_clicked') {
+                        console.log('Click:', data.button);
+                    } else if (data.type === 'key_pressed') {
+                        console.log('Tecla presionada:', data.key);
+                    }
+                } catch (error) {
+                    console.error('Error procesando mensaje:', error);
+                    showError('Error procesando mensaje del servidor');
+                }
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function requestScreen() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    action: 'get_screen'
+                }));
+            }
+        }
+
+        async function updateScreen(data) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => {
+                    try {
+                        // Actualizar dimensiones remotas
+                        if (data.screen_width && data.screen_height) {
+                            remoteWidth = data.screen_width;
+                            remoteHeight = data.screen_height;
+                            
+                            // Mantener el aspect ratio
+                            const containerWidth = Math.min(1024, canvas.parentElement.clientWidth);
+                            const scale = containerWidth / remoteWidth;
+                            
+                            canvas.style.width = containerWidth + 'px';
+                            canvas.style.height = (remoteHeight * scale) + 'px';
+                            canvas.width = remoteWidth;
+                            canvas.height = remoteHeight;
+                        }
+                        
+                        // Limpiar el canvas antes de dibujar
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        
+                        // Solicitar siguiente frame
+                        if (isConnected) {
+                            requestAnimationFrame(() => requestScreen());
+                        }
+                        
+                        resolve();
+                    } catch (error) {
+                        reject(error);
+                    }
+                };
+                
+                img.onerror = () => {
+                    reject(new Error('Error cargando imagen'));
+                };
+                
+                // Convertir datos binarios a base64 si es necesario
+                if (data.data instanceof ArrayBuffer) {
+                    const bytes = new Uint8Array(data.data);
+                    const binary = Array.from(bytes)
+                        .map(byte => String.fromCharCode(byte))
+                        .join('');
+                    img.src = 'data:image/jpeg;base64,' + btoa(binary);
+                } else {
+                    img.src = 'data:image/jpeg;base64,' + data.data;
+                }
+            });
+        }
+        
+        function showError(message) {
+            ctx.fillStyle = '#ff0000';
+            ctx.font = '20px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(message, canvas.width/2, canvas.height/2);
+        }
+
+        // Función para enviar comandos al servidor
+        function sendCommand(action, data = {}) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            
+            const command = {
+                action,
+                ...data,
+                timestamp: Date.now()
+            };
+            
+            // Convertir a ArrayBuffer
+            const encoder = new TextEncoder();
+            const buffer = encoder.encode(JSON.stringify(command));
+            ws.send(buffer);
+        }
+
+        // Mouse events
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isConnected) return;
+            
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.round((e.clientX - rect.left) * (remoteWidth / canvas.clientWidth));
+            const y = Math.round((e.clientY - rect.top) * (remoteHeight / canvas.clientHeight));
+            
+            sendCommand('mouse_move', { x, y });
+        });
+        
+        canvas.addEventListener('mousedown', (e) => {
+            if (!isConnected) return;
+            
+            const button = e.button === 0 ? 'left' : e.button === 2 ? 'right' : 'middle';
+            sendCommand('mouse_click', { button });
+        });
+        
+        // Prevent context menu on right click
+        canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+        });
+        
+        // Keyboard events
+        document.addEventListener('keydown', (e) => {
+            if (!isConnected) return;
+            
+            sendCommand('key_press', { key: e.key });
+            
+            // Prevent default for certain key combinations
+            if (e.ctrlKey || e.altKey || e.key === 'F11') {
+                e.preventDefault();
+            }
+        });
+        
+        // Iniciar la conexión automáticamente
+        window.addEventListener('load', () => {
+            connect();
+        });
+    </script>
+</body>
+</html>
